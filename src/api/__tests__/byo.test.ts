@@ -245,7 +245,7 @@ describe('request body shape', () => {
   });
 
   it('falls back to the default model when cfg.model is empty', () => {
-    expect(buildCompletionsBody({ ...CFG, model: '' }, 'x', true).model).toBe('gpt-4o-mini');
+    expect(buildCompletionsBody({ ...CFG, model: '' }, 'x', true).model).toBe('kr/claude-sonnet-5.5');
   });
 
   // 0.9.8: system prompt opsional — pesan pertama bila ada.
