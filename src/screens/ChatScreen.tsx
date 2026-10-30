@@ -16,6 +16,7 @@ import {
   Alert,
   type AlertButton,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Linking,
   Modal,
@@ -43,6 +44,7 @@ import {
   stopRoom,
 } from '../api/client';
 import { getByo, streamByoReplyWithTools, wasByoEverConfigured, type ChatTool, type ParsedToolCall } from '../api/byo';
+import { generateImage } from '../api/image';
 import {
   buildTaskExecutionRepairPrompt,
   looksLikePlanOnly,
@@ -103,7 +105,7 @@ import {
   executeOpenBrowserTool,
 } from '../api/browserTools';
 import { copyTextToClipboard } from '../api/clipboard';
-import { splitMessageSegments } from '../api/messageTables';
+import { extractImageUris, splitMessageSegments, stripImageMarkdown } from '../api/messageTables';
 import {
   REACTION_EMOJIS,
   getReactions,
@@ -219,6 +221,9 @@ export function ChatScreen() {
   // asli PC, sesi login) untuk isi halaman; pesan biasa -> searchWeb
   // untuk hasil pencarian. Gagal = chat normal tanpa konteks web.
   const [webEnabled, setWebEnabled] = useState(false);
+  const [imageEnabled, setImageEnabled] = useState(false);
+  const [codeEnabled, setCodeEnabled] = useState(false);
+  const [generatingImage, setGeneratingImage] = useState(false);
   const [searchingWeb, setSearchingWeb] = useState(false);
   // Indikator thinking di dalam chat (0.10.7, Sam: "tambah 1 thinking
   // jadi kita tau bot kerja apa bengon") — SATU indikator yang jadi
@@ -941,6 +946,86 @@ export function ChatScreen() {
         );
         return;
       }
+      // Toggle Image: bila ON, pesan diperlakukan sebagai prompt gambar
+      // — panggil endpoint image gateway BYO, bukan chat. Pesan user
+      // disimpan dulu (fail-soft, seperti jalur chat), lalu balasan
+      // assistant berisi Markdown gambar + nama model, disimpan juga.
+      if (imageEnabled) {
+        if (!byo) {
+          const errText =
+            '🖼️ Image perlu BYO — isi Base URL + credential di Settings → Model API sendiri dulu, baru nyalakan toggle Image.';
+          setMessages((prev) =>
+            prev.map((m) => (m.id === streamId ? { ...m, text: errText, streaming: false } : m)),
+          );
+          try {
+            const savedErr = await persistMessageWithRetry(roomId, characterId ?? null, errText, 'assistant');
+            if (savedErr) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === streamId ? { ...m, id: savedErr.message.id, local: false } : m)),
+              );
+            }
+          } catch {
+            // Balasan error gagal tersimpan — tetap tampil di layar.
+          }
+          return;
+        }
+        try {
+          const savedUser = await persistMessage(
+            roomId,
+            characterId ?? null,
+            text,
+            'user',
+            reply ? String(reply.id) : undefined,
+          );
+          if (savedUser) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === userMsg.id ? { ...m, id: savedUser.message.id, local: false } : m)),
+            );
+            setServerWarning(null);
+          }
+        } catch {
+          setServerWarning(
+            'Server tidak terjangkau — pesan ini tidak tersimpan dan akan hilang saat keluar chat. Periksa WiFi / server.',
+          );
+        }
+        setGeneratingImage(true);
+        try {
+          const img = await generateImage(byo.baseUrl, byo.credential, text);
+          const md = `![Gambar](${img.uri})\nDibuat dengan model ${img.model}.`;
+          setMessages((prev) =>
+            prev.map((m) => (m.id === streamId ? { ...m, text: md, streaming: false } : m)),
+          );
+          try {
+            const savedImg = await persistMessageWithRetry(roomId, characterId ?? null, md, 'assistant');
+            if (savedImg) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === streamId ? { ...m, id: savedImg.message.id, local: false } : m)),
+              );
+            }
+          } catch {
+            // Gagal simpan — gambar tetap tampil di layar.
+          }
+        } catch (e) {
+          const errText =
+            e instanceof Error ? `🖼️ ${e.message}` : '🖼️ Gagal membuat gambar. Coba lagi.';
+          setMessages((prev) =>
+            prev.map((m) => (m.id === streamId ? { ...m, text: errText, streaming: false } : m)),
+          );
+          try {
+            const savedErr = await persistMessageWithRetry(roomId, characterId ?? null, errText, 'assistant');
+            if (savedErr) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === streamId ? { ...m, id: savedErr.message.id, local: false } : m)),
+              );
+            }
+          } catch {
+            // Balasan error gagal tersimpan — tetap tampil di layar.
+          }
+        } finally {
+          setGeneratingImage(false);
+        }
+        return;
+      }
       if (byo) {
         // 2a. BYO tersedia: bila toggle Web ON, ambil konteks web dulu
         // — URL di pesan dibuka lewat browser asli PC (sesi login),
@@ -983,6 +1068,7 @@ export function ChatScreen() {
           sandboxAvailable,
           workspace: sandboxWorkspace,
           webEnabled,
+          codeEnabled,
           botToolsAvailable: true,
           skillToolsAvailable: true,
           mcpToolsAvailable: mcpTools.length > 0,
@@ -1350,7 +1436,7 @@ export function ChatScreen() {
       // baru. No-op bila tidak ada turn terdaftar.
       completeTurn(roomId, turnStatus, turn.generation);
     }
-  }, [input, roomId, characterId, roomMembers, runTypewriter, webEnabled, allowAllTools, requestCredential, replyTarget, startThinking, showThinkingTool, noteThinkingProgress]);
+  }, [input, roomId, characterId, roomMembers, runTypewriter, webEnabled, imageEnabled, codeEnabled, allowAllTools, requestCredential, replyTarget, startThinking, showThinkingTool, noteThinkingProgress]);
 
   const renderItem = ({ item }: { item: UiMessage }) => {
     const isUser = item.role === 'user';
@@ -1370,7 +1456,10 @@ export function ChatScreen() {
           {!isUser ? (
             <Text style={[styles.bubbleName, { color: accent }]}>{displayName}</Text>
           ) : null}
-          {splitMessageSegments(item.text).map((seg, si) =>
+          {extractImageUris(item.text).map((uri, ii) => (
+            <Image key={`img-${ii}`} source={{ uri }} style={styles.generatedImage} resizeMode="cover" />
+          ))}
+          {splitMessageSegments(stripImageMarkdown(item.text)).map((seg, si) =>
             seg.type === 'table' ? (
               // Kotak analisa/tabel (0.10.0, bagian K): bisa di-slide
               // horizontal supaya kolom tidak terpotong di tepi bubble.
@@ -1546,7 +1635,26 @@ export function ChatScreen() {
             🌐 Web {webEnabled ? 'ON' : 'OFF'}
           </Text>
         </Pressable>
+        <Pressable
+          style={[styles.webChip, imageEnabled && styles.webChipOn]}
+          onPress={() => setImageEnabled((v) => !v)}
+          accessibilityLabel="Toggle gambar"
+        >
+          <Text style={[styles.webChipText, imageEnabled && styles.webChipTextOn]}>
+            🖼️ Image {imageEnabled ? 'ON' : 'OFF'}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={[styles.webChip, codeEnabled && styles.webChipOn]}
+          onPress={() => setCodeEnabled((v) => !v)}
+          accessibilityLabel="Toggle mode kode"
+        >
+          <Text style={[styles.webChipText, codeEnabled && styles.webChipTextOn]}>
+            💻 Code {codeEnabled ? 'ON' : 'OFF'}
+          </Text>
+        </Pressable>
         {searchingWeb ? <Text style={styles.webSearching}>🌐 Mencari web…</Text> : null}
+        {generatingImage ? <Text style={styles.webSearching}>🖼️ Membuat gambar…</Text> : null}
       </View>
 
       {/* ALWAYS ALLOW (0.10.7, Sam): tidak ada lagi kartu approval
@@ -2019,6 +2127,7 @@ const styles = StyleSheet.create({
   },
   webBar: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     paddingHorizontal: spacing.lg,
     paddingBottom: spacing.sm,
@@ -2044,6 +2153,12 @@ const styles = StyleSheet.create({
   webSearching: {
     color: colors.accent,
     fontSize: type.small,
+  },
+  generatedImage: {
+    width: 260,
+    height: 260,
+    borderRadius: 12,
+    marginVertical: 4,
   },
   approvalCard: {
     marginHorizontal: spacing.lg,

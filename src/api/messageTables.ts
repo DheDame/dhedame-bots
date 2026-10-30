@@ -67,3 +67,25 @@ export function splitMessageSegments(input: string): MessageSegment[] {
   flushText();
   return segments;
 }
+
+// Gambar (toggle Image): balasan image disimpan sebagai Markdown
+// ![alt](uri) di teks pesan — supaya lolos lewat store chat teks yang
+// sudah ada — lalu ChatScreen me-render-nya sebagai <Image>.
+// Pola regex dibuat fresh tiap panggilan (regex /g itu stateful).
+const IMAGE_MD_SRC = '!\\[[^\\]]*\\]\\(([^)]+)\\)';
+
+/** Semua URI gambar dari sintaks Markdown ![alt](uri) dalam teks. */
+export function extractImageUris(text: string): string[] {
+  const out: string[] = [];
+  const re = new RegExp(IMAGE_MD_SRC, 'g');
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out.push(m[1]);
+  }
+  return out;
+}
+
+/** Teks tanpa sintaks Markdown gambar (untuk render teks biasa). */
+export function stripImageMarkdown(text: string): string {
+  return text.replace(new RegExp(IMAGE_MD_SRC, 'g'), '').trim();
+}

@@ -38,6 +38,8 @@ export interface SystemPromptOptions {
   workspace?: string | null;
   /** True bila toggle Web ON — model diberi tahu konteks web tersedia. */
   webEnabled?: boolean;
+  /** True bila toggle Code ON — model menjawab dalam mode kode. */
+  codeEnabled?: boolean;
   /** True bila tool manajemen bot (create_bot/list_bots) tersedia. */
   botToolsAvailable?: boolean;
   /** True bila tool pembuat skill (create_skill/list_skills/assign_skill) tersedia. */
@@ -289,6 +291,11 @@ export function buildSystemPrompt(
   if (opts?.webEnabled) {
     blocks.push(
       'Konteks web: bila pesan pengguna disertai hasil pencarian atau isi halaman web, pakai hasil itu sebagai sumber jawabanmu dan sebutkan bila informasinya berasal dari web.',
+    );
+  }
+  if (opts?.codeEnabled) {
+    blocks.push(
+      'Mode kode: jawab dengan fokus pada kode — beri kode lengkap yang bisa dijalankan dalam blok kode, dengan penjelasan singkat sebelum atau sesudah kode; bila ada beberapa pendekatan, pilih yang paling langsung dan katakan kenapa.',
     );
   }
   if (opts?.botToolsAvailable) {
